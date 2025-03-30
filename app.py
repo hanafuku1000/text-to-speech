@@ -1,91 +1,121 @@
 import os
-from google.cloud import texttospeech
-import io
-import streamlit as st
-from google.cloud import secretmanager
 import tempfile
+import logging
+from google.cloud import texttospeech
+from google.cloud import secretmanager
+import streamlit as st
+import io
 
+# ロギング設定
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-
-#=============================================================
-# 公開する場合の、api_keyの設定
-#=============================================================
-def access_secret_version(project_id, secret_id, version_id="latest"):
+def access_secret_version(project_id: str, secret_id: str, version_id="latest") -> str:
+    """
+    Secret Managerからシークレットを取得する関数
+    """
     try:
         client = secretmanager.SecretManagerServiceClient()
         name = f"projects/{project_id}/secrets/{secret_id}/versions/{version_id}"
         response = client.access_secret_version(request={"name": name})
+        logging.info(f"Secret Managerからシークレットを正常に取得しました: {secret_id}")
         return response.payload.data.decode("utf-8")
     except Exception as e:
-        st.error(f"Secret Managerからシークレットの取得に失敗しました: {e}")
+        logging.error(f"Secret Managerからシークレットの取得に失敗しました: {e}")
         raise RuntimeError("認証情報の取得が失敗しました。")
 
-# プロジェクトIDを指定（Google Cloud プロジェクトID）
-project_id = "udemy-text-to-speach-455123"
-secret_id = "secret_key20250330"
+def set_google_credentials(is_local: bool):
+    """
+    Google Cloud認証情報を設定する関数（ローカルと公開環境に対応）
+    """
+    temp_file_path = None
+    try:
+        if is_local:
+            # 環境変数から認証情報のパスを取得
+            credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if not credentials_path or not os.path.exists(credentials_path):
+                raise FileNotFoundError(f"認証ファイルが見つかりません: {credentials_path}")
+            logging.info(f"ローカル環境: 認証情報を設定しました (Path: {credentials_path})")
+        else:
+            project_id = "udemy-text-to-speach-455123"
+            secret_id = "secret_key20250330"
+            api_key = access_secret_version(project_id, secret_id)
+            with tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-8') as temp_file:
+                temp_file.write(api_key)
+                temp_file_path = temp_file.name
+                os.chmod(temp_file_path, 0o600)  # アクセス権を制限
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_file_path
+            logging.info(f"公開環境: 一時ファイルに認証情報を設定しました (Path: {temp_file_path})")
+    except Exception as e:
+        logging.error(f"認証情報の設定に失敗しました: {e}")
+        raise RuntimeError("認証情報の設定に失敗しました。")
+    finally:
+        if temp_file_path:
+            import atexit
+            atexit.register(lambda: safe_remove(temp_file_path))
 
-# シークレットを取得
-api_key = access_secret_version(project_id, secret_id)
-#print(f"取得したAPIキー: {api_key}")
+def safe_remove(file_path: str):
+    """
+    一時ファイルを安全に削除する関数
+    """
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logging.info(f"一時ファイルを削除しました: {file_path}")
+    except Exception as e:
+        logging.warning(f"一時ファイルの削除に失敗しました: {file_path}, エラー: {e}")
 
-# Secret Managerから取得した認証情報を一時ファイルに保存
-try:
-    # 一時ファイルの作成と環境変数の設定
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        temp_file.write(api_key.encode("utf-8"))
-        temp_file_path = temp_file.name
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_file_path
-
-    # 認証後の処理（音声合成など）
-    client = texttospeech.TextToSpeechClient()
-    # 必要な処理をここで実行...
-
-finally:
-    # 一時ファイルの削除
-    os.remove(temp_file_path)
-
+def configure_environment():
+    """
+    環境設定を行う関数
+    """
+    environment = os.environ.get("ENVIRONMENT", "local").lower()
+    if environment not in ["local", "production"]:
+        raise ValueError(f"無効な環境設定: {environment}")
+    is_local = environment == "local"
+    set_google_credentials(is_local)
 
 #=============================================================
-#ローカルで使用する場合は、secret.jsonを読込むだけでイケル
+#ローカルで外部ファイルを使用して環境変数を指定する場合は、secret.jsonを読込むだけでイケル
 #=============================================================
 #os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "secret.json"
+
+# メイン処理
+try:
+    # 環境設定
+    configure_environment()
+
+    # Text-to-Speechクライアントの初期化
+    client = texttospeech.TextToSpeechClient()
+    logging.info("Google Text-to-Speech Clientが正常に初期化されました")
+except Exception as e:
+    logging.error(f"処理中にエラーが発生しました: {e}")
 
 
 
 #=============================================================
 # 音声を合成する関数
 #=============================================================
-def synthesize_speech(text,lang="日本語",gender="default"):
+def synthesize_speech(text, lang="日本語", gender="default"):
+    try:
+        client = texttospeech.TextToSpeechClient()
+
+        synthesis_input = texttospeech.SynthesisInput(text=text)
+        voice = texttospeech.VoiceSelectionParams(
+            language_code=lang_code[lang],
+            ssml_gender=gender_type[gender]
+        )
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3
+        )
+        response = client.synthesize_speech(
+            input=synthesis_input, voice=voice, audio_config=audio_config
+        )
+        return response
     
+    except Exception as e:
+        logging.error(f"音声合成中にエラーが発生しました: {e}")
+        raise RuntimeError("音声合成に失敗しました。")
 
-
-    # TextToSpeechClientをインスタンス化＝APIを使用できるようにする
-    # Google Cloudの認証情報を同時に以下の1行で確認
-    client = texttospeech.TextToSpeechClient()
-
-    # 読み上げテキストの設定
-    synthesis_input = texttospeech.SynthesisInput(text=text) #読み上げるテキストを指定
-
-    # Build the voice request, select the language code ("en-US") and the ssml
-    # 音声と言語の設定
-    voice = texttospeech.VoiceSelectionParams(
-        
-        #言語と声の性別を設定
-        language_code=lang_code[lang], ssml_gender= gender_type[gender] #gender_type辞書型から性別を取得して指定
-
-    )
-
-    # 生成音声の種類（拡張子）
-    audio_config = texttospeech.AudioConfig(
-        audio_encoding=texttospeech.AudioEncoding.MP3
-    )
-
-    # APIの呼び出し
-    response = client.synthesize_speech(
-        input=synthesis_input, voice=voice, audio_config=audio_config
-    )
-
-    return response
 
 
 #=============================================================
