@@ -6,6 +6,13 @@ from google.cloud import secretmanager
 import streamlit as st
 import io
 
+def check_credentials():
+    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not credentials_path or not os.path.exists(credentials_path):
+        raise FileNotFoundError(f"認証ファイルが見つかりません: {credentials_path}")
+    
+
+
 # ロギング設定
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -21,63 +28,41 @@ def access_secret_version(project_id: str, secret_id: str, version_id="latest") 
         return response.payload.data.decode("utf-8")
     except Exception as e:
         logging.error(f"Secret Managerからシークレットの取得に失敗しました: {e}")
-        raise RuntimeError("認証情報の取得が失敗しました。")
+        raise RuntimeError(f"Secret Managerからのシークレット取得に失敗しました: {e}")
 
 def set_google_credentials(is_local: bool):
     """
     Google Cloud認証情報を設定する関数（ローカルと公開環境に対応）
     """
-    temp_file_path = None
-    try:
-        if is_local:
-            # 環境変数から認証情報のパスを取得
-            credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-            if not credentials_path or not os.path.exists(credentials_path):
-                raise FileNotFoundError(f"認証ファイルが見つかりません: {credentials_path}")
-            logging.info(f"ローカル環境: 認証情報を設定しました (Path: {credentials_path})")
-        else:
-            project_id = "udemy-text-to-speach-455123"
-            secret_id = "secret_key20250330"
-            api_key = access_secret_version(project_id, secret_id)
-            with tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-8') as temp_file:
-                temp_file.write(api_key)
-                temp_file_path = temp_file.name
-                os.chmod(temp_file_path, 0o600)  # アクセス権を制限
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_file_path
-            logging.info(f"公開環境: 一時ファイルに認証情報を設定しました (Path: {temp_file_path})")
-    except Exception as e:
-        logging.error(f"認証情報の設定に失敗しました: {e}")
-        raise RuntimeError("認証情報の設定に失敗しました。")
-    finally:
-        if temp_file_path:
-            import atexit
-            atexit.register(lambda: safe_remove(temp_file_path))
-
-def safe_remove(file_path: str):
-    """
-    一時ファイルを安全に削除する関数
-    """
-    try:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            logging.info(f"一時ファイルを削除しました: {file_path}")
-    except Exception as e:
-        logging.warning(f"一時ファイルの削除に失敗しました: {file_path}, エラー: {e}")
+    if is_local:
+        # ローカル環境: secret.jsonを使用
+        credentials_path = "secret.json"
+        if not os.path.exists(credentials_path):
+            raise FileNotFoundError(f"認証ファイルが見つかりません: {credentials_path}")
+        return credentials_path
+    else:
+        # 公開環境: Secret Managerから認証情報を取得
+        project_id = "udemy-text-to-speach-455123"
+        secret_id = "secret_key20250330"
+        api_key = access_secret_version(project_id, secret_id)
+        with tempfile.NamedTemporaryFile(delete=True, mode='w', encoding='utf-8') as temp_file:
+            temp_file.write(api_key)
+            temp_file_path = temp_file.name
+            os.chmod(temp_file_path, 0o400)  # アクセス権を制限
+        return temp_file_path
 
 def configure_environment():
     """
     環境設定を行う関数
     """
+    check_credentials()
     environment = os.environ.get("ENVIRONMENT", "local").lower()
     if environment not in ["local", "production"]:
         raise ValueError(f"無効な環境設定: {environment}")
     is_local = environment == "local"
-    set_google_credentials(is_local)
-
-#=============================================================
-#ローカルで外部ファイルを使用して環境変数を指定する場合は、secret.jsonを読込むだけでイケル
-#=============================================================
-#os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "secret.json"
+    credentials_path = set_google_credentials(is_local)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+    logging.info(f"認証情報を設定しました (Path: {credentials_path})")
 
 # メイン処理
 try:
@@ -89,7 +74,6 @@ try:
     logging.info("Google Text-to-Speech Clientが正常に初期化されました")
 except Exception as e:
     logging.error(f"処理中にエラーが発生しました: {e}")
-
 
 
 #=============================================================
@@ -197,12 +181,18 @@ if input_data is not None:
     st.write("コチラの文章で音声ファイルの生成をおこないますか？")
     
     if st.button("開始"):
-        comment = st.empty()
-        comment.write("音声出力を開始します")
-        response = synthesize_speech(input_data,lang,gender)  # 音声合成関数を呼び出す
+        try:
+            comment = st.empty()
+            comment.write("音声出力を開始します")
+            response = synthesize_speech(input_data, lang, gender)
+            st.audio(response.audio_content)
+            comment.write("完了しました")
+        except Exception as e:
+            st.error(f"音声合成に失敗しました: {e}")
 
-        #音声の再生
-        st.audio(response.audio_content) #音声ファイルを再生
-        comment.write("完了しました")
 
+import subprocess
 
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    subprocess.run(["streamlit", "run", "app.py", "--server.port", str(port), "--server.address", "0.0.0.0"])
